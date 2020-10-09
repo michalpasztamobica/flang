@@ -41,6 +41,8 @@ static int rte_rank = 0;
 static int rte_preserve_desc = 0;
 static int rte_final_desc = 0;
 
+NO WAY THIS WILL COMPILE
+
 void
 set_descriptor_class(int class)
 {
