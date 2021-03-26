@@ -41,6 +41,7 @@
 #include "main.h"
 #include "symfun.h"
 #include "ilidir.h"
+#include "fdirect.h"
 
 #ifdef OMP_OFFLOAD_LLVM
 #include "ompaccel.h"
@@ -209,6 +210,7 @@ static struct {
   unsigned _fcmp_negate : 1;
   unsigned _last_stmt_is_branch : 1;
   unsigned _rw_no_dep_check : 1;
+  unsigned _rw_acc_grp_check : 1;
 } CGMain;
 
 #define new_ebb (CGMain._new_ebb)
@@ -220,6 +222,7 @@ static struct {
 #define fcmp_negate (CGMain._fcmp_negate)
 #define last_stmt_is_branch (CGMain._last_stmt_is_branch)
 #define rw_nodepcheck (CGMain._rw_no_dep_check)
+#define rw_access_group (CGMain._rw_acc_grp_check)
 
 static int funcId;
 static int fnegcc[17] = LLCCF_NEG;
@@ -237,6 +240,7 @@ static LL_MDRef cached_vectorize_enable_metadata = ll_get_md_null();
 static LL_MDRef cached_vectorize_disable_metadata = ll_get_md_null();
 static LL_MDRef cached_unroll_enable_metadata = ll_get_md_null();
 static LL_MDRef cached_unroll_disable_metadata = ll_get_md_null();
+static LL_MDRef cached_access_group_metadata;
 
 static bool CG_cpu_compile = false;
 
@@ -827,6 +831,21 @@ clear_rw_nodepchk(void)
   clear_cached_loop_id_md();
 }
 
+INLINE static void
+mark_rw_access_grp(int bih)
+{
+  rw_access_group = 1;
+  if (!BIH_NODEPCHK2(bih))
+    cached_loop_metadata = ll_get_md_null();
+}
+
+INLINE static void
+clear_rw_access_grp(void)
+{
+  rw_access_group = 0;
+  cached_loop_metadata = ll_get_md_null();
+}
+
 void
 print_personality(void)
 {
@@ -976,6 +995,20 @@ assign_fortran_storage_classes(void)
     }
   }
 } /* end assign_fortran_storage_classes() */
+
+/*
+ * when vector always pragma is specified, "llvm.loop.parallel_accesses" metadata has
+ * to be generated along with "llvm.access.group" for each load/store instructions.
+ */
+INLINE static LL_MDRef
+cons_loop_parallel_accesses_metadata(void)
+{
+  LL_MDRef lvcomp[2];
+
+  lvcomp[0] = ll_get_md_string(cpu_llvm_module, "llvm.loop.parallel_accesses");
+  lvcomp[1] = cached_access_group_metadata;
+  return ll_get_md_node(cpu_llvm_module, LL_PlainMDNode, lvcomp, 2);
+} // cons_loop_parallel_accesses_metadata
 
 /**
    \brief Construct exactly one cached instance of !{!"llvm.loop.vectorize.enable", 0}.
@@ -1330,7 +1363,22 @@ cons_no_depchk_metadata(void)
    \brief Construct exactly one cached instance of !{!"llvm.loop.unroll.enable"}.
  */
 static LL_MDRef
-cons_unroll_metadata(void)
+cons_vec_always_metadata(void)
+{
+  if (LL_MDREF_IS_NULL(cached_loop_metadata)) {
+    LL_MDRef vectorize = cons_vectorize_metadata();
+    LL_MDRef paraccess = cons_loop_parallel_accesses_metadata();
+    LL_MDRef md = ll_create_flexible_md_node(cpu_llvm_module);
+    ll_extend_md_node(cpu_llvm_module, md, md);
+    ll_extend_md_node(cpu_llvm_module, md, vectorize);
+    ll_extend_md_node(cpu_llvm_module, md, paraccess);
+    cached_loop_metadata = md;
+  }
+  return cached_loop_metadata;
+}
+
+static LL_MDRef
+cons_unroll_metadata(void) //Calls the metadata for unroll
 {
   LL_MDRef lvcomp[1];
   if (LL_MDREF_IS_NULL(cached_unroll_enable_metadata)) {
@@ -1379,6 +1427,36 @@ remove_dead_instrs(void)
       instr = instr->prev;
   }
 }
+
+/*
+ * Check if the branch instruction is having a loop pragma
+ * xbit/xflag pair.
+ */
+static bool check_for_loop_directive(int branch_line_number, int xbit, int xflag) {
+  int iter;
+  LPPRG *lpprg;
+
+  // Check if any loop pragmas are specified
+  if (direct.lpg.avail > 1) {
+    // Loop thru all the loop pragmas
+    for (iter = 1; iter < direct.lpg.avail; iter++) {
+      lpprg = direct.lpg.stgb + iter;
+      // check if xbit/xflag pair is available
+      if ((lpprg->dirset.x[xbit] & xflag)
+          &&
+          (branch_line_number == lpprg->end_line)) {
+        return  true;
+      } // if
+
+      if (branch_line_number < lpprg->beg_line) {
+        // branch instruction is not having any pragma specified.
+        break;
+      } // if
+    } // for
+  } // if
+
+  return false;
+} // check_for_loop_directive
 
 /**
    \brief process debug info of constants with parameter attribute.
@@ -1574,6 +1652,9 @@ restartConcur:
   bih = BIH_NEXT(0);
   if ((XBIT(34, 0x200) || gbl.usekmpc) && !processHostConcur)
     bih = gbl.entbih;
+
+  cached_access_group_metadata = ll_create_distinct_md_node(cpu_llvm_module, LL_PlainMDNode, NULL, 0);
+
   /* construct the body of the function */
   for (; bih; bih = BIH_NEXT(bih))
     for (ilt = BIH_ILTFIRST(bih); ilt; ilt = ILT_NEXT(ilt))
@@ -1655,6 +1736,12 @@ restartConcur:
       mark_rw_nodepchk(bih);
     } else {
       clear_rw_nodepchk();
+    }
+    if (XBIT(191, 0x4)) {
+      fix_nodepchk_flag(bih);
+      mark_rw_access_grp(bih);
+    } else {
+      clear_rw_access_grp();
     }
     if (flg.x[9] > 0)
       unroll_factor = flg.x[9];
@@ -1743,7 +1830,23 @@ restartConcur:
           // metadata once.
           (void)cons_no_depchk_metadata();
         }
-        if (BIH_UNROLL(bih)){ // Set on open_pragma() -> if(XBIT(11,0X3))
+        if ((check_for_loop_directive(ILT_LINENO(ilt), 191, 0x4))) {
+          LL_MDRef loop_md = cons_vec_always_metadata();
+          INSTR_LIST *i = find_last_executable(llvm_info.last_instr);
+          if (i) {
+            i->flags |= LOOP_BACKEDGE_FLAG;
+            i->misc_metadata = loop_md;
+          }
+        }
+        if (BIH_UNROLL(bih)) {
+          LL_MDRef loop_md = cons_unroll_metadata();
+          INSTR_LIST *i = find_last_executable(llvm_info.last_instr);
+          if (i) {
+            i->flags |= LOOP_BACKEDGE_FLAG;
+            i->misc_metadata = loop_md;
+          }
+	}
+        if (BIH_UNROLL(bih)) { // Set on open_pragma() -> if(XBIT(11,0X3))
           if (LL_MDREF_IS_NULL(loop_md))
             loop_md = cons_loop_id_md();
           ll_extend_md_node(cpu_llvm_module, loop_md, cons_unroll_metadata());
@@ -2846,6 +2949,20 @@ write_no_depcheck_metadata(LL_Module *module, INSTR_LIST *insn)
   }
 }
 
+INLINE static void
+write_llaccgroup_metadata(LL_Module *module, INSTR_LIST *insn)
+{
+  if (insn->flags & LDST_HAS_ACCESSGRP_METADATA) {
+    char buf[64];
+    int n;
+    DEBUG_ASSERT(insn->misc_metadata, "missing metadata");
+    n = snprintf(buf, 64, ", !llvm.access.group !%u",
+                 LL_MDREF_value(cached_access_group_metadata));
+    DEBUG_ASSERT(n < 64, "buffer overrun");
+    print_token(buf);
+  }
+}
+
 /* write out the struct member types */
 static void
 write_verbose_type(LL_Type *ll_type)
@@ -3250,6 +3367,7 @@ write_instructions(LL_Module *module)
         assert(p->next == NULL, "write_instructions(), bad next ptr", 0,
                ERR_Fatal);
         write_no_depcheck_metadata(module, instrs);
+        write_llaccgroup_metadata(module, instrs);
         write_tbaa_metadata(module, instrs->ilix, instrs->operands,
                             instrs->flags);
         break;
@@ -3270,6 +3388,7 @@ write_instructions(LL_Module *module)
 
         write_memory_order_and_alignment(instrs);
         write_no_depcheck_metadata(module, instrs);
+        write_llaccgroup_metadata(module, instrs);
         write_tbaa_metadata(module, instrs->ilix, instrs->operands->next,
                             instrs->flags & VOLATILE_FLAG);
         break;
@@ -3484,6 +3603,10 @@ mk_store_instr(OPERAND *val, OPERAND *addr)
   if (rw_nodepcheck) {
     insn->flags |= LDST_HAS_METADATA;
     insn->misc_metadata = cons_no_depchk_metadata();
+  }
+  if (rw_access_group) {
+    insn->flags |= LDST_HAS_ACCESSGRP_METADATA;
+    insn->misc_metadata = cons_vec_always_metadata();
   }
   ad_instr(0, insn);
   return insn;
@@ -3745,6 +3868,10 @@ ad_csed_instr(LL_InstrName instr_name, int ilix, LL_Type *ll_type,
   if ((instr_name == I_LOAD) && rw_nodepcheck) {
     flags |= LDST_HAS_METADATA;
     instr->misc_metadata = cons_no_depchk_metadata();
+  }
+  if ((instr_name == I_LOAD) && rw_access_group) {
+    flags |= LDST_HAS_ACCESSGRP_METADATA;
+    instr->misc_metadata = cons_vec_always_metadata();
   }
   instr->flags = flags;
   ad_instr(ilix, instr);
@@ -6790,6 +6917,10 @@ make_load(int ilix, OPERAND *load_op, LL_Type *rslt_type, MSZ msz,
   if (rw_nodepcheck) {
     flags |= LDST_HAS_METADATA;
     Curr_Instr->misc_metadata = cons_no_depchk_metadata();
+  }
+  if (rw_access_group) {
+    flags |= LDST_HAS_ACCESSGRP_METADATA;
+    Curr_Instr->misc_metadata = cons_vec_always_metadata();
   }
   Curr_Instr->flags = (LL_InstrListFlags)flags;
   load_op->next = NULL;
