@@ -2942,7 +2942,7 @@ write_no_depcheck_metadata(LL_Module *module, INSTR_LIST *insn)
     char buf[64];
     int n;
     DEBUG_ASSERT(insn->misc_metadata, "missing metadata");
-    n = snprintf(buf, 64, ", !llvm.mem.parallel_loop_access !%u",
+    n = snprintf(buf, 64, ", !llvm.access.group !%u",
                  LL_MDREF_value(insn->misc_metadata));
     DEBUG_ASSERT(n < 64, "buffer overrun");
     print_token(buf);
