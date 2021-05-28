@@ -16,4 +16,6 @@ end subroutine
 ! METADATA: load {{.*}}, !llvm.access.group ![[TAG1:[0-9]+]]
 ! METADATA: store {{.*}}, !llvm.access.group ![[TAG1]]
 ! METADATA: ![[TAG2:[0-9]+]] = !{!"llvm.loop.vectorize.enable", i1 true}
-! METADATA: ![[TAG1:[0-9]+]] = distinct !{![[TAG1]], ![[TAG2]]}
+! METADATA: ![[TAG3:[0-9]+]] = !{!"llvm.loop.parallel_accesses", ![[TAG4:[0-9]+]]}
+! METADATA: ![[TAG4]] = distinct !{}
+! METADATA: ![[TAG1:[0-9]+]] = distinct !{![[TAG1]], ![[TAG2]], ![[TAG3]]}

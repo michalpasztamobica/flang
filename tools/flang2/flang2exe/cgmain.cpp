@@ -800,12 +800,6 @@ clear_cached_loop_id_md()
 
 // Construct a new loop ID node or return previously cached one.
 // It looks like: !0 = !{!0}
-//
-// FIXME: These IDs currently do not map cleanly to loops as they should. Flang
-// may construct multiple loop IDs for one logical loop. The main effect of this
-// is that !llvm.mem.parallel_loop_access metadata will name multiple different
-// loops for a single logical loop, causing the vectorizor to pessimistically
-// inhibit vectorization. This bug is present before this refactoring commit.
 INLINE static LL_MDRef
 cons_loop_id_md()
 {
@@ -836,14 +830,14 @@ mark_rw_access_grp(int bih)
 {
   rw_access_group = 1;
   if (!BIH_NODEPCHK2(bih))
-    cached_loop_metadata = ll_get_md_null();
+    clear_cached_loop_id_md();
 }
 
 INLINE static void
 clear_rw_access_grp(void)
 {
   rw_access_group = 0;
-  cached_loop_metadata = ll_get_md_null();
+  clear_cached_loop_id_md();
 }
 
 void
@@ -1354,7 +1348,9 @@ cons_no_depchk_metadata(void)
   if (!cached_loop_id_md_has_vectorize) {
     cached_loop_id_md_has_vectorize = true;
     LL_MDRef vectorize = cons_vectorize_metadata();
+    LL_MDRef paraccess = cons_loop_parallel_accesses_metadata();
     ll_extend_md_node(cpu_llvm_module, loop_id_md, vectorize);
+    ll_extend_md_node(cpu_llvm_module, loop_id_md, paraccess);
   }
   return loop_id_md;
 }
@@ -1365,16 +1361,12 @@ cons_no_depchk_metadata(void)
 static LL_MDRef
 cons_vec_always_metadata(void)
 {
-  if (LL_MDREF_IS_NULL(cached_loop_metadata)) {
-    LL_MDRef vectorize = cons_vectorize_metadata();
-    LL_MDRef paraccess = cons_loop_parallel_accesses_metadata();
-    LL_MDRef md = ll_create_flexible_md_node(cpu_llvm_module);
-    ll_extend_md_node(cpu_llvm_module, md, md);
-    ll_extend_md_node(cpu_llvm_module, md, vectorize);
-    ll_extend_md_node(cpu_llvm_module, md, paraccess);
-    cached_loop_metadata = md;
-  }
-  return cached_loop_metadata;
+  LL_MDRef loop_id_md = cons_loop_id_md();
+  LL_MDRef vectorize = cons_vectorize_metadata();
+  LL_MDRef paraccess = cons_loop_parallel_accesses_metadata();
+  ll_extend_md_node(cpu_llvm_module, loop_id_md, vectorize);
+  ll_extend_md_node(cpu_llvm_module, loop_id_md, paraccess);
+  return loop_id_md;
 }
 
 static LL_MDRef
@@ -1832,14 +1824,6 @@ restartConcur:
         }
         if ((check_for_loop_directive(ILT_LINENO(ilt), 191, 0x4))) {
           LL_MDRef loop_md = cons_vec_always_metadata();
-          INSTR_LIST *i = find_last_executable(llvm_info.last_instr);
-          if (i) {
-            i->flags |= LOOP_BACKEDGE_FLAG;
-            i->misc_metadata = loop_md;
-          }
-        }
-        if (BIH_UNROLL(bih)) {
-          LL_MDRef loop_md = cons_unroll_metadata();
           INSTR_LIST *i = find_last_executable(llvm_info.last_instr);
           if (i) {
             i->flags |= LOOP_BACKEDGE_FLAG;
