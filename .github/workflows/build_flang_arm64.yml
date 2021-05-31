@@ -10,13 +10,12 @@ on:
     paths-ignore:
       - '**/.github/workflows/build_flang.yml'
 
-jobs:       
+jobs:
   build_flang:
     runs-on: self-hosted
     env:
       build_path: /home/github
       install_prefix: /home/github/usr/local
-      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
     container:
       image: ghcr.io/${{ github.repository_owner}}/ubuntu20-flang-${{ matrix.llvm_branch }}:latest
       credentials:
@@ -36,18 +35,20 @@ jobs:
           cmake --version
           make --version
 
-      - name: Extract SHA
-        run: echo "::set-output name=sha::${GITHUB_SHA}"
-        id: extract
-
-      - name: Manual checkout to build in user's home dir
+      - name: Manual checkout to build in user's home dir (push)
+        if: github.ref == 'refs/heads/main'
         run: |
           cd ${{ env.build_path }}
-          git clone https://github.com/michalpasztamobica/flang.git
+          git clone https://github.com/flang-compiler/flang.git
+
+      - name: Manual checkout to build in user's home dir (pull_request)
+        if: github.ref != 'refs/heads/main'
+        run: |
+          cd ${{ env.build_path }}
+          git clone https://github.com/flang-compiler/flang.git
           cd flang
-          git reset --hard ${{ steps.extract.outputs.sha }}
-          echo "Building commit: "
-          git log -n1
+          git fetch origin ${{github.ref}}:pr_branch
+          git checkout pr_branch
 
       - name: Build libpgmath
         run: |
